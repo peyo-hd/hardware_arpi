@@ -33,6 +33,9 @@
 #include <system/audio.h>
 #include <hardware/audio.h>
 #include <tinyalsa/asoundlib.h>
+#include <audio_utils/echo_reference.h>
+#include <hardware/audio_effect.h>
+#include <audio_effects/effect_aec.h>
 
 #define PCM_CARD 0
 #define PCM_DEVICE 0
@@ -47,7 +50,7 @@
 #define STUB_DEFAULT_SAMPLE_RATE   48000
 #define STUB_DEFAULT_AUDIO_FORMAT  AUDIO_FORMAT_PCM_16_BIT
 
-#define STUB_INPUT_BUFFER_MILLISECONDS  20
+#define STUB_INPUT_BUFFER_MILLISECONDS  10
 #define STUB_INPUT_DEFAULT_CHANNEL_MASK AUDIO_CHANNEL_IN_STEREO
 
 #define STUB_OUTPUT_BUFFER_MILLISECONDS  10
@@ -72,6 +75,9 @@ struct pcm_config pcm_config_in = {
 struct stub_audio_device {
     struct audio_hw_device device;
     pthread_mutex_t lock;
+
+    struct stub_stream_out *active_output;
+    struct echo_reference_itfe *echo_reference;
 };
 
 struct stub_stream_out {
@@ -87,7 +93,10 @@ struct stub_stream_out {
     bool standby;
     uint64_t written;
     struct stub_audio_device *dev;
+    struct echo_reference_itfe *echo_reference;
 };
+
+#define MAX_PREPROCESSORS 1 /* maximum one AEC per input stream */
 
 struct stub_stream_in {
     struct audio_stream_in stream;
@@ -104,6 +113,17 @@ struct stub_stream_in {
     uint32_t pcm_card;
 
     void *raw_buf;
+
+    struct echo_reference_itfe *echo_reference;
+    bool need_echo_reference;
+    effect_handle_t preprocessors[MAX_PREPROCESSORS];
+    int num_preprocessors;
+    int16_t *proc_buf;
+    size_t proc_buf_size;
+    size_t proc_frames_in;
+    int16_t *ref_buf;
+    size_t ref_buf_size;
+    size_t ref_frames_in;
 };
 
 static int check_output_config(struct audio_config *audio_config) {
@@ -140,19 +160,87 @@ static int start_output_stream(struct stub_stream_out *out)
     if (out->pcm == NULL) {
         return -ENOMEM;
     }
+    out->dev->active_output = out;
     if (out->pcm && !pcm_is_ready(out->pcm)) {
         ALOGE("pcm_open(out) failed: %s", pcm_get_error(out->pcm));
         pcm_close(out->pcm);
-	out->pcm = NULL;
+        out->pcm = NULL;
+        out->dev->active_output = NULL;
         return -ENOMEM;
     }
     ALOGV("%s exit",__func__);
     return 0;
 }
 
+static void add_echo_reference(struct stub_stream_out *out,
+                               struct echo_reference_itfe *reference)
+{
+    pthread_mutex_lock(&out->lock);
+    out->echo_reference = reference;
+    pthread_mutex_unlock(&out->lock);
+}
+
+static void remove_echo_reference(struct stub_stream_out *out,
+                                  struct echo_reference_itfe *reference)
+{
+    pthread_mutex_lock(&out->lock);
+    if (out->echo_reference == reference) {
+        /* stop writing to echo reference */
+        reference->write(reference, NULL);
+        out->echo_reference = NULL;
+    }
+    pthread_mutex_unlock(&out->lock);
+}
+
+static void put_echo_reference(struct stub_audio_device *adev,
+                               struct echo_reference_itfe *reference)
+{
+    if (adev->echo_reference != NULL &&
+        reference == adev->echo_reference) {
+        if (adev->active_output != NULL) {
+            remove_echo_reference(adev->active_output, reference);
+        }
+        release_echo_reference(reference);
+        adev->echo_reference = NULL;
+    }
+}
+
+static struct echo_reference_itfe *get_echo_reference(struct stub_audio_device *adev,
+        audio_format_t format __unused,
+        uint32_t channel_count,
+        uint32_t sampling_rate)
+{
+    put_echo_reference(adev, adev->echo_reference);
+    if (adev->active_output != NULL) {
+        struct audio_stream *stream = &adev->active_output->stream.common;
+        uint32_t wr_channel_count = popcount(stream->get_channels(stream));
+        uint32_t wr_sampling_rate = stream->get_sample_rate(stream);
+
+        int status = create_echo_reference(AUDIO_FORMAT_PCM_16_BIT,
+                                           channel_count,
+                                           sampling_rate,
+                                           AUDIO_FORMAT_PCM_16_BIT,
+                                           wr_channel_count,
+                                           wr_sampling_rate,
+                                           &adev->echo_reference);
+        if (status == 0) {
+            add_echo_reference(adev->active_output, adev->echo_reference);
+        }
+    }
+    return adev->echo_reference;
+}
+
 static int start_input_stream(struct stub_stream_in *in)
 {
     ALOGV("start_input_stream");
+
+    if (in->need_echo_reference && in->echo_reference == NULL) {
+        in->echo_reference = get_echo_reference(in->dev,
+                                                AUDIO_FORMAT_PCM_16_BIT,
+                                                in->config->channels,
+                                                in->config->rate);
+    }
+
     in->pcm = pcm_open(in->pcm_card, PCM_IN_DEVICE, PCM_IN, in->config);
     if (in->pcm == NULL) {
         return -ENOMEM;
@@ -163,6 +251,38 @@ static int start_input_stream(struct stub_stream_in *in)
         in->pcm = NULL;
         return -ENOMEM;
     }
+
+    return 0;
+}
+
+static int get_playback_delay(struct stub_stream_out *out,
+                              size_t frames,
+                              struct echo_reference_buffer *buffer)
+{
+
+    unsigned int kernel_frames;
+    int status;
+
+    status = pcm_get_htimestamp(out->pcm, &kernel_frames, &buffer->time_stamp);
+    if (status < 0) {
+        buffer->time_stamp.tv_sec  = 0;
+        buffer->time_stamp.tv_nsec = 0;
+        buffer->delay_ns           = 0;
+        ALOGV("get_playback_delay(): pcm_get_htimestamp error,"
+              "setting playbackTimestamp to 0");
+        return status;
+    }
+    kernel_frames = pcm_get_buffer_size(out->pcm) - kernel_frames;
+
+    /* adjust render time stamp with delay added by current driver buffer.
+     * Add the duration of current frame as we want the render time of the last
+     * sample being written. */
+    buffer->delay_ns = (long)(((int64_t)(kernel_frames + frames) * 1000000000) /
+                              out->config->rate);
+
+    ALOGV("get_playback_delay time_stamp = [%ld].[%ld], delay_ns: [%d],"
+          "kernel_frames:[%d]", buffer->time_stamp.tv_sec , buffer->time_stamp.tv_nsec,
+          buffer->delay_ns, kernel_frames);
     return 0;
 }
 
@@ -228,6 +348,12 @@ static int out_standby(struct audio_stream *stream)
         pcm_close(out->pcm);
         out->pcm = NULL;
         out->standby = true;
+        out->dev->active_output = NULL;
+        /* stop writing to echo reference */
+        if (out->echo_reference != NULL) {
+            out->echo_reference->write(out->echo_reference, NULL);
+            out->echo_reference = NULL;
+        }
     }
     pthread_mutex_unlock(&out->lock);
     pthread_mutex_unlock(&out->dev->lock);
@@ -294,6 +420,14 @@ static ssize_t out_write(struct audio_stream_out *stream, const void* buffer,
         out->standby = false;
     }
     pthread_mutex_unlock(&adev->lock);
+
+    if (out->echo_reference != NULL) {
+        struct echo_reference_buffer b;
+        b.raw = (void *)buffer;
+        b.frame_count = in_frames;
+        get_playback_delay(out, in_frames, &b);
+        out->echo_reference->write(out->echo_reference, &b);
+    }
 
     ret = pcm_write(out->pcm, in_buffer, in_frames * frame_size);
     if (ret == -EPIPE) {
@@ -402,6 +536,14 @@ static int do_input_standby(struct stub_stream_in *in)
     if (!in->standby) {
         pcm_close(in->pcm);
         in->pcm = NULL;
+
+        if (in->echo_reference != NULL) {
+            /* stop reading from echo reference */
+            in->echo_reference->read(in->echo_reference, NULL);
+            put_echo_reference(in->dev, in->echo_reference);
+            in->echo_reference = NULL;
+        }
+
         in->standby = true;
     }
     return 0;
@@ -441,6 +583,164 @@ static int in_set_gain(struct audio_stream_in *stream, float gain)
     return 0;
 }
 
+static void get_capture_delay(struct stub_stream_in *in,
+                              size_t frames __unused,
+                              struct echo_reference_buffer *buffer)
+{
+    /* read frames available in kernel driver buffer */
+    uint kernel_frames;
+    struct timespec tstamp;
+    long buf_delay;
+    long kernel_delay;
+    long delay_ns;
+
+    if (pcm_get_htimestamp(in->pcm, &kernel_frames, &tstamp) < 0) {
+        buffer->time_stamp.tv_sec  = 0;
+        buffer->time_stamp.tv_nsec = 0;
+        buffer->delay_ns           = 0;
+        ALOGW("read get_capture_delay(): pcm_htimestamp error");
+        return;
+    }
+
+    /* read frames available in audio HAL input buffer
+     * add number of frames being read as we want the capture time of first sample
+     * in current buffer */
+    buf_delay = (long)(((int64_t)(in->proc_frames_in) * 1000000000)
+                       / in->config->rate);
+
+    kernel_delay = (long)(((int64_t)kernel_frames * 1000000000) / in->config->rate);
+
+    delay_ns = kernel_delay + buf_delay;
+
+    buffer->time_stamp = tstamp;
+    buffer->delay_ns   = delay_ns;
+    ALOGV("get_capture_delay time_stamp = [%ld].[%ld], delay_ns: [%d],"
+         " kernel_delay:[%ld], buf_delay:[%ld], kernel_frames:[%d], "
+         "in->proc_frames_in:[%ld], frames:[%ld]",
+         buffer->time_stamp.tv_sec , buffer->time_stamp.tv_nsec, buffer->delay_ns,
+         kernel_delay, buf_delay, kernel_frames,
+         in->proc_frames_in, frames);
+}
+
+static int32_t update_echo_reference(struct stub_stream_in *in, size_t frames)
+{
+    struct echo_reference_buffer b;
+    b.delay_ns = 0;
+
+    ALOGV("update_echo_reference, frames = [%zu], in->ref_frames_in = [%zu],  "
+          "b.frame_count = [%zu]", frames, in->ref_frames_in, frames - in->ref_frames_in);
+    if (in->ref_frames_in < frames) {
+        if (in->ref_buf_size < frames) {
+            in->ref_buf_size = frames;
+            in->ref_buf = (int16_t *)realloc(in->ref_buf,
+                                             in->ref_buf_size * in->config->channels * sizeof(int16_t));
+        }
+
+        b.frame_count = frames - in->ref_frames_in;
+        b.raw = (void *)(in->ref_buf + in->ref_frames_in * in->config->channels);
+
+        get_capture_delay(in, frames, &b);
+        ALOGV("update_echo_reference  return ::b.delay_ns=%d", b.delay_ns);
+
+        if (in->echo_reference->read(in->echo_reference, &b) == 0) {
+            in->ref_frames_in += b.frame_count;
+            ALOGV("update_echo_reference: in->ref_frames_in:[%zu], "
+                  "in->ref_buf_size:[%zu], frames:[%zu], b.frame_count:[%zu]",
+                  in->ref_frames_in, in->ref_buf_size, frames, b.frame_count);
+        }
+    } else {
+        ALOGW("update_echo_reference: NOT enough frames to read ref buffer");
+    }
+    return b.delay_ns;
+}
+
+static int set_preprocessor_param(effect_handle_t handle,
+                                  effect_param_t *param)
+{
+    uint32_t size = sizeof(int);
+    uint32_t psize = ((param->psize - 1) / sizeof(int) + 1) * sizeof(int) +
+                     param->vsize;
+
+    int status = (*handle)->command(handle,
+                                    EFFECT_CMD_SET_PARAM,
+                                    sizeof(effect_param_t) + psize,
+                                    param,
+                                    &size,
+                                    &param->status);
+    if (status == 0) {
+        status = param->status;
+    }
+
+    return status;
+}
+
+static int set_preprocessor_echo_delay(effect_handle_t handle,
+                                       int32_t delay_us)
+{
+    uint32_t buf[sizeof(effect_param_t) / sizeof(uint32_t) + 2];
+    effect_param_t *param = (effect_param_t *)buf;
+
+    param->psize = sizeof(uint32_t);
+    param->vsize = sizeof(uint32_t);
+    *(uint32_t *)param->data = AEC_PARAM_ECHO_DELAY;
+    *((int32_t *)param->data + 1) = delay_us;
+
+    return set_preprocessor_param(handle, param);
+}
+
+static int set_preprocessor_mobile_mode(effect_handle_t handle,
+                                       bool mobile_mode)
+{
+    uint32_t buf[sizeof(effect_param_t) / sizeof(uint32_t) + 2];
+    effect_param_t *param = (effect_param_t *)buf;
+
+    param->psize = sizeof(uint32_t);
+    param->vsize = sizeof(uint32_t);
+    *(uint32_t *)param->data = AEC_PARAM_MOBILE_MODE;
+    *((int32_t *)param->data + 1) = (int32_t)mobile_mode;
+
+    return set_preprocessor_param(handle, param);
+}
+
+static void push_echo_reference(struct stub_stream_in *in, size_t frames)
+{
+    /* read frames from echo reference buffer and update echo delay
+     * in->ref_frames_in is updated with frames available in in->ref_buf */
+    int32_t delay_us = update_echo_reference(in, frames) / 1000;
+    int i;
+    audio_buffer_t buf;
+    audio_buffer_t out_buf;
+
+    if (in->ref_frames_in < frames) {
+        frames = in->ref_frames_in;
+    }
+
+    buf.frameCount = frames;
+    buf.raw = in->ref_buf;
+
+    out_buf.frameCount = frames;
+    out_buf.raw = in->raw_buf;
+
+    for (i = 0; i < in->num_preprocessors; i++) {
+        if ((*in->preprocessors[i])->process_reverse == NULL) {
+            continue;
+        }
+
+        (*in->preprocessors[i])->process_reverse(in->preprocessors[i],
+                &buf,
+                &out_buf);
+        set_preprocessor_echo_delay(in->preprocessors[i], delay_us);
+    }
+
+    in->ref_frames_in -= buf.frameCount;
+    if (in->ref_frames_in) {
+        memcpy(in->ref_buf,
+               in->ref_buf + buf.frameCount * in->config->channels,
+               in->ref_frames_in * in->config->channels * sizeof(int16_t));
+    }
+}
+
+
 static void copy32to16(void *dest, void *src, size_t bytes) {
     uint16_t *dest16 = (uint16_t *)dest;
     uint16_t *src32 = (uint16_t *)src;
@@ -449,12 +749,103 @@ static void copy32to16(void *dest, void *src, size_t bytes) {
     }
 }
 
+/* read_frames() reads frames from kernel driver */
+static ssize_t read_frames(struct stub_stream_in *in, void *buffer, ssize_t frames)
+{
+    if (in->pcm == NULL) {
+        return -ENODEV;
+    }
+
+    size_t bytes = frames * audio_stream_in_frame_size(&in->stream);
+    int read_status = pcm_read(in->pcm, in->raw_buf, bytes * 2);
+
+    if (read_status == 0) {
+        copy32to16(buffer, in->raw_buf, bytes);
+        return frames;
+    } else {
+        ALOGE("read_frames() pcm_read error %d", read_status);
+        return read_status;
+    }
+}
+
+/* process_frames() reads frames from kernel driver (via read_frames()),
+ * calls the active audio pre processings and output the number of frames requested
+ * to the buffer specified */
+static ssize_t process_frames(struct stub_stream_in *in, void* buffer, ssize_t frames)
+{
+    ssize_t frames_wr = 0;
+    audio_buffer_t in_buf;
+    audio_buffer_t out_buf;
+    int i;
+
+    //LOGFUNC("%s(%d, %p, %ld)", __FUNCTION__, in->num_preprocessors, buffer, frames);
+    while (frames_wr < frames) {
+        /* first reload enough frames at the end of process input buffer */
+        if (in->proc_frames_in < (size_t)frames) {
+            ssize_t frames_rd;
+
+            if (in->proc_buf_size < (size_t)frames) {
+                in->proc_buf_size = (size_t)frames;
+                in->proc_buf = (int16_t *)realloc(in->proc_buf,
+                                                  in->proc_buf_size *
+                                                  in->config->channels * sizeof(int16_t));
+                ALOGV("process_frames(): in->proc_buf %p size extended to %zu frames",
+                      in->proc_buf, in->proc_buf_size);
+            }
+            frames_rd = read_frames(in,
+                                    in->proc_buf +
+                                    in->proc_frames_in * in->config->channels,
+                                    frames - in->proc_frames_in);
+            if (frames_rd < 0) {
+                frames_wr = frames_rd;
+                break;
+            }
+            in->proc_frames_in += frames_rd;
+        }
+
+        if (in->echo_reference != NULL) {
+            push_echo_reference(in, in->proc_frames_in);
+        }
+
+        /* in_buf.frameCount and out_buf.frameCount indicate respectively
+         * the maximum number of frames to be consumed and produced by process() */
+        in_buf.frameCount = in->proc_frames_in;
+        in_buf.s16 = in->proc_buf;
+        out_buf.frameCount = frames - frames_wr;
+        out_buf.s16 = (int16_t *)buffer + frames_wr * in->config->channels;
+
+        for (i = 0; i < in->num_preprocessors; i++)
+            (*in->preprocessors[i])->process(in->preprocessors[i],
+                                             &in_buf,
+                                             &out_buf);
+
+        /* process() has updated the number of frames consumed and produced in
+         * in_buf.frameCount and out_buf.frameCount respectively
+         * move remaining frames to the beginning of in->proc_buf */
+        in->proc_frames_in -= in_buf.frameCount;
+        if (in->proc_frames_in) {
+            memcpy(in->proc_buf,
+                   in->proc_buf + in_buf.frameCount * in->config->channels,
+                   in->proc_frames_in * in->config->channels * sizeof(int16_t));
+        }
+
+        /* if not enough frames were passed to process(), read more and retry. */
+        if (out_buf.frameCount == 0) {
+            continue;
+        }
+
+        frames_wr += out_buf.frameCount;
+    }
+    return frames_wr;
+}
+
 static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
                        size_t bytes)
 {
     struct stub_stream_in *in = (struct stub_stream_in *)stream;
     struct stub_audio_device *adev = in->dev;
     int ret = 0;
+    size_t frames_rq = bytes / audio_stream_in_frame_size(&in->stream);
 
     ALOGV("in_read: bytes %zu", bytes);
 
@@ -469,15 +860,26 @@ static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
         in->standby = false;
     }
 
-    ret = pcm_read(in->pcm, in->raw_buf, bytes * 2);
-    if (ret != 0) {
-        ALOGE("pcm_read() returned error %d : %s", ret, pcm_get_error(in->pcm));
-        memset(buffer, 0 , bytes);
+    if (in->num_preprocessors != 0) {
+        ret = process_frames(in, buffer, frames_rq);
+        if (ret < 0) {
+            ALOGE("process_frames() returned error %d", ret);
+        } else {
+            ret = 0;
+        }
     } else {
-        copy32to16(buffer, in->raw_buf, bytes);
+        ret = pcm_read(in->pcm, in->raw_buf, bytes * 2);
+        if (ret != 0) {
+            ALOGE("pcm_read() returned error %d : %s", ret, pcm_get_error(in->pcm));
+        } else {
+            copy32to16(buffer, in->raw_buf, bytes);
+        }
     }
 
 exit:
+    if (ret != 0) {
+        memset(buffer, 0, bytes);
+    }
     pthread_mutex_unlock(&in->lock);
     return bytes;
 }
@@ -489,12 +891,84 @@ static uint32_t in_get_input_frames_lost(struct audio_stream_in *stream)
 
 static int in_add_audio_effect(const struct audio_stream *stream, effect_handle_t effect)
 {
-    return 0;
+    struct stub_stream_in *in = (struct stub_stream_in *)stream;
+    int status;
+    effect_descriptor_t desc;
+
+    pthread_mutex_lock(&in->dev->lock);
+    pthread_mutex_lock(&in->lock);
+    if (in->num_preprocessors >= MAX_PREPROCESSORS) {
+        status = -ENOSYS;
+        goto exit;
+    }
+
+    status = (*effect)->get_descriptor(effect, &desc);
+    if (status != 0) {
+        goto exit;
+    }
+
+    in->preprocessors[in->num_preprocessors++] = effect;
+
+    if (memcmp(&desc.type, FX_IID_AEC, sizeof(effect_uuid_t)) == 0) {
+        in->need_echo_reference = true;
+        do_input_standby(in);
+        set_preprocessor_mobile_mode(effect, false);
+    }
+
+exit:
+
+    pthread_mutex_unlock(&in->lock);
+    pthread_mutex_unlock(&in->dev->lock);
+    return status;
 }
 
 static int in_remove_audio_effect(const struct audio_stream *stream, effect_handle_t effect)
 {
-    return 0;
+    struct stub_stream_in *in = (struct stub_stream_in *)stream;
+    int i;
+    int status = -EINVAL;
+    bool found = false;
+    effect_descriptor_t desc;
+
+    pthread_mutex_lock(&in->dev->lock);
+    pthread_mutex_lock(&in->lock);
+    if (in->num_preprocessors <= 0) {
+        status = -ENOSYS;
+        goto exit;
+    }
+
+    for (i = 0; i < in->num_preprocessors; i++) {
+        if (found) {
+            in->preprocessors[i - 1] = in->preprocessors[i];
+            continue;
+        }
+        if (in->preprocessors[i] == effect) {
+            in->preprocessors[i] = NULL;
+            status = 0;
+            found = true;
+        }
+    }
+
+    if (status != 0) {
+        goto exit;
+    }
+
+    in->num_preprocessors--;
+
+    status = (*effect)->get_descriptor(effect, &desc);
+    if (status != 0) {
+        goto exit;
+    }
+    if (memcmp(&desc.type, FX_IID_AEC, sizeof(effect_uuid_t)) == 0) {
+        in->need_echo_reference = false;
+        do_input_standby(in);
+    }
+
+exit:
+
+    pthread_mutex_unlock(&in->lock);
+    pthread_mutex_unlock(&in->dev->lock);
+    return status;
 }
 
 static size_t samples_per_milliseconds(size_t milliseconds,
@@ -752,6 +1226,8 @@ static void adev_close_input_stream(struct audio_hw_device *dev,
     in_standby(&in->common);
 
     struct stub_stream_in *sin = (struct stub_stream_in *)in;
+    free(sin->ref_buf);
+    free(sin->proc_buf);
     free(sin->raw_buf);
     free(in);
 }

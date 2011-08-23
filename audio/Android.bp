@@ -5,11 +5,14 @@ cc_library_shared {
     srcs: ["audio_hw.c"],
     include_dirs: [
         "external/tinyalsa/include",
+        "system/media/audio_utils/include",
+        "system/media/audio_effects/include",
     ],
     header_libs: ["libhardware_headers"],
     shared_libs: [
         "liblog",
         "libtinyalsa",
+        "libaudioutils",
     ],
     cflags: ["-Wall", "-Werror", "-Wno-unused-parameter"],
 }
