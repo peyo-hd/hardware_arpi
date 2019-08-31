@@ -10,6 +10,7 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_INIT_RC := android.hardware.graphics.allocator@2.0-service.rpi3.rc
 
 LOCAL_SRC_FILES := \
+        drm_gralloc_vc4.c \
         drm_gralloc_rpi3.cpp \
         Allocator.cpp \
         service.cpp
@@ -35,8 +36,33 @@ LOCAL_C_INCLUDES := \
         system/core/libgrallocusage/include \
         system/core/libutils/include
 
+LOCAL_C_INCLUDES += \
+	    external/mesa3d/include \
+	    external/mesa3d/src \
+	    external/mesa3d/src/gallium \
+	    external/mesa3d/src/gallium/include \
+	    external/mesa3d/src/gallium/winsys \
+	    external/mesa3d/src/gallium/drivers \
+	    external/mesa3d/src/gallium/auxiliary
+	    
+LOCAL_STATIC_LIBRARIES += \
+        libmesa_winsys_vc4 \
+        libmesa_pipe_vc4 \
+        libmesa_gallium \
+        libmesa_glsl \
+        libmesa_glsl_utils \
+        libmesa_nir \
+        libmesa_util \
+        libmesa_compiler
+        
+LOCAL_SHARED_LIBRARIES += \
+        libexpat \
+        libz
+
 LOCAL_CFLAGS += \
         -Wall \
-        -Werror
+        -Werror \
+        -Wno-unused-variable \
+        -Wno-unused-parameter
 
 include $(BUILD_EXECUTABLE)
