@@ -22,7 +22,7 @@
  */
 
 #define LOG_TAG "composer@2.1-drm_kms_rpi3"
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #include <cutils/properties.h>
 #include <utils/Log.h>
 #include <errno.h>
@@ -91,6 +91,9 @@ int hwc_context::bo_add_fb(struct gralloc_drm_bo_t *bo)
 		return -EINVAL;
 	}
 
+	ALOGV("bo_add_fb() width:%d height:%d format:%x handle:%d pitch:%d",
+			bo->handle->width, bo->handle->height,
+					drm_format, handle, pitches[0]);
 	return drmModeAddFB2(kms_fd,
 		bo->handle->width, bo->handle->height,
 		drm_format, handles, pitches, offsets,
