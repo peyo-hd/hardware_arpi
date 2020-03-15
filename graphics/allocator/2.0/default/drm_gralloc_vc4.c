@@ -180,9 +180,11 @@ static void pipe_destroy(struct gralloc_drm_drv_t *drv)
 	FREE(pm);
 }
 
+struct pipe_screen *vc4_screen_create(int fd);
+
 static int pipe_init_screen(struct pipe_manager *pm)
 {
-	struct pipe_screen *screen = vc4_drm_screen_create(pm->fd, NULL);
+	struct pipe_screen *screen = vc4_screen_create(fcntl(pm->fd, F_DUPFD_CLOEXEC, 3));
 
 	if (!screen) {
 		ALOGW("failed to create screen");
