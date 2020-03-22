@@ -10,6 +10,7 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_INIT_RC := android.hardware.graphics.allocator@2.0-service.rpi3.rc
 
 LOCAL_SRC_FILES := \
+        vc4_resource.c \
         vc4_screen.c \
         drm_gralloc_vc4.c \
         drm_gralloc_rpi3.cpp \
@@ -63,6 +64,7 @@ LOCAL_CFLAGS += \
         -Werror \
         -Wno-unused-variable \
         -Wno-unused-parameter \
-        -Wno-missing-field-initializers
+        -Wno-missing-field-initializers \
+        -Wno-pointer-arith
 
 include $(BUILD_EXECUTABLE)
