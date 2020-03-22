@@ -16,8 +16,8 @@
 #include <vc4/drm/vc4_drm_public.h>
 #include <target-helpers/inline_debug_helper.h>
 
-
-#include "gralloc_drm_priv.h"
+#include <gralloc_drm.h>
+#include <gralloc_drm_priv.h>
 
 struct pipe_manager {
 	struct gralloc_drm_drv_t base;
@@ -80,10 +80,6 @@ static unsigned get_pipe_bind(int usage)
 
 	return bind;
 }
-
-#ifndef DRM_FORMAT_MOD_INVALID
-#define DRM_FORMAT_MOD_INVALID ((1ULL << 56) - 1)
-#endif
 
 static struct pipe_buffer *get_pipe_buffer_locked(struct pipe_manager *pm,
 		struct gralloc_drm_handle_t *handle)
@@ -191,6 +187,7 @@ static int pipe_init_screen(struct pipe_manager *pm)
 		return -EINVAL;
 	}
 	pm->screen = debug_screen_wrap(screen);
+
 	return 0;
 }
 
@@ -229,7 +226,7 @@ static void init_drv_from_fd(int fd)
 }
 
 static int fd = -1;
-void drm_gralloc_vc4_init(void)
+void drm_init_vc4()
 {
 	char *path = "/dev/dri/card0";
 	fd = open(path, O_RDWR);
@@ -242,12 +239,14 @@ void drm_gralloc_vc4_init(void)
 		close(fd);
 	}
 }
-void drm_gralloc_vc4_destroy()
+
+void drm_destroy_vc4()
 {
 	if (drv)
 		drv->destroy(drv);
 	close(fd);
 }
+
 
 static struct gralloc_drm_handle_t *create_bo_handle(int width,
 		int height, int format, int usage)
@@ -282,7 +281,7 @@ static int gralloc_drm_get_pid(void)
 	return gralloc_drm_pid;
 }
 
-struct gralloc_drm_bo_t *vc4_bo_create(
+static struct gralloc_drm_bo_t *vc4_bo_create(
 		int width, int height, int format, int usage)
 {
 	struct gralloc_drm_bo_t *bo;
@@ -309,9 +308,30 @@ struct gralloc_drm_bo_t *vc4_bo_create(
 	return bo;
 }
 
-void vc4_bo_destroy(struct gralloc_drm_bo_t *bo)
-{
-	drv->free(drv, bo);
+int drm_alloc_vc4(int w, int h, int format, int usage,
+		buffer_handle_t *handle, int *stride) {
+	struct gralloc_drm_bo_t *bo;
+	int bpp = gralloc_drm_get_bpp(format);
+	if (!bpp) return -EINVAL;
+
+	struct gralloc_drm_bo_t *vc4_bo = vc4_bo_create(w, h, format, usage);
+	ALOGV("drm_alloc() vc4_bo_create() called");
+
+	if (!vc4_bo) return -ENOMEM;
+
+	if (stride) {
+		*stride = vc4_bo->handle->stride;
+		/* in pixels */
+		*stride /= bpp;
+	}
+	*handle = &vc4_bo->handle->base;
+
+	return 0;
 }
 
-
+void drm_free_vc4(buffer_handle_t handle) {
+	struct gralloc_drm_handle_t *drm_handle = gralloc_drm_handle(handle);
+	if (drm_handle->prime_fd > 0)
+	    close(drm_handle->prime_fd);
+	drv->free(drv, (struct gralloc_drm_bo_t *)drm_handle->data);
+}

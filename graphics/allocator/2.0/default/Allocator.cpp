@@ -5,8 +5,14 @@
 #include <grallocusage/GrallocUsageConversion.h>
 
 #include <hardware/gralloc1.h>
-#include "drm_gralloc_rpi3.h"
 #include "Allocator.h"
+
+extern "C" {
+void drm_init_vc4();
+void drm_destroy_vc4();
+int drm_alloc_vc4(int w, int h, int format, int usage, buffer_handle_t *handle, int *stride);
+void drm_free_vc4(buffer_handle_t handle);
+}
 
 namespace android {
 namespace hardware {
@@ -17,15 +23,12 @@ namespace implementation {
 
 Allocator::Allocator() {
     ALOGV("Constructing");
-    int error = drm_init();
-    if (error) {
-        ALOGE("Failed drm_init() %d", error);
-    }
+    drm_init_vc4();
 }
 
 Allocator::~Allocator() {
 	ALOGV("Destructing");
-    drm_deinit();
+    drm_destroy_vc4();
 }
 
 Return<void> Allocator::dumpDebugInfo(dumpDebugInfo_cb hidl_cb) {
@@ -93,7 +96,7 @@ Error Allocator::allocateOneBuffer(
 
     ALOGV("Calling alloc(%u, %u, %i, %u)", descInfo.width,
             descInfo.height, descInfo.format, usage);
-    auto error = drm_alloc(static_cast<int>(descInfo.width),
+    auto error = drm_alloc_vc4(static_cast<int>(descInfo.width),
             static_cast<int>(descInfo.height), static_cast<int>(descInfo.format),
             usage, &handle, &stride);
     if (error != 0) {
@@ -150,10 +153,7 @@ Return<void> Allocator::allocate(const BufferDescriptor& descriptor,
 
 void Allocator::freeBuffers(const std::vector<const native_handle_t*>& buffers) {
     for (auto buffer : buffers) {
-    	int result = drm_free(buffer);
-    	if (result != 0) {
-    		ALOGE("drm_free () failed: %d", result);
-    	}
+        drm_free_vc4(buffer);
     }
 }
 
