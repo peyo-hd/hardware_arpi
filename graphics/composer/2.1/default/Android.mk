@@ -8,7 +8,7 @@ LOCAL_MODULE_RELATIVE_PATH := hw
 LOCAL_MODULE_TAGS := optional
 
 LOCAL_SRC_FILES := \
-        drm_kms_rpi3.cpp \
+        drm_kms_vc4.cpp \
         Hwc2Device.cpp \
         ComposerHal.cpp \
         ComposerCommandEngine.cpp \

@@ -21,7 +21,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#define LOG_TAG "composer@2.1-drm_kms_rpi3"
+#define LOG_TAG "composer@2.1-drm_kms_vc4"
 #define LOG_NDEBUG 0
 #include <cutils/properties.h>
 #include <utils/Log.h>

@@ -18,7 +18,7 @@ Hwc2Device::Hwc2Device()
     ALOGV("Hwc2Device()");
     mHwcContext = std::make_unique<hwc_context>();
 
-    mFbInfo.name = "hwc-rpi3";
+    mFbInfo.name = "hwc-vc4";
     mFbInfo.width = mHwcContext->width;
     mFbInfo.height = mHwcContext->height;
     mFbInfo.format = mHwcContext->format;
@@ -221,7 +221,7 @@ void Hwc2Device::dump(uint32_t* outSize, char* outBuffer)
     }
 
     std::stringstream output;
-    output << "-- hwc-rpi3 --\n";
+    output << "-- hwc-vc4 --\n";
     mDumpString = output.str();
     *outSize = static_cast<uint32_t>(mDumpString.size());
 }
