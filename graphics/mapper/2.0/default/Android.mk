@@ -8,7 +8,7 @@ LOCAL_MODULE_RELATIVE_PATH := hw
 LOCAL_MODULE_TAGS := optional
 
 LOCAL_SRC_FILES := \
-        drm_mapper_rpi3.cpp \
+        drm_gralloc_mapper.cpp \
         Mapper.cpp
 
 LOCAL_SHARED_LIBRARIES := \
