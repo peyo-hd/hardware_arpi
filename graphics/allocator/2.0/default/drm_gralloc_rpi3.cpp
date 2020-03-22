@@ -12,25 +12,17 @@ struct gralloc_drm_bo_t *vc4_bo_create(int width, int height, int format, int us
 void vc4_bo_destroy(struct gralloc_drm_bo_t *bo);
 }
 
-int drm_init(struct drm_module_t *mod) {
+int drm_init() {
 	int err = 0;
-	if (!mod->drm) {
-		mod->drm = gralloc_drm_create();
-		if (!mod->drm)
-			err = -EINVAL;
-		else
-			drm_gralloc_vc4_init();
-	}
+	drm_gralloc_vc4_init();
 	return err;
 }
 
-void drm_deinit(struct drm_module_t *mod) {
-	gralloc_drm_destroy(mod->drm);
-	mod->drm = NULL;
+void drm_deinit() {
 	drm_gralloc_vc4_destroy();
 }
 
-int drm_alloc(const struct drm_module_t *mod, int w, int h, int format, int usage,
+int drm_alloc(int w, int h, int format, int usage,
 		buffer_handle_t *handle, int *stride) {
 	struct gralloc_drm_bo_t *bo;
 	int bpp = gralloc_drm_get_bpp(format);
@@ -40,8 +32,10 @@ int drm_alloc(const struct drm_module_t *mod, int w, int h, int format, int usag
 	ALOGV("drm_alloc() vc4_bo_create() called");
 
 	if (!vc4_bo) return -ENOMEM;
-	vc4_bo->drm = mod->drm;
-	*handle = gralloc_drm_bo_get_handle(vc4_bo, stride);
+
+	if (stride)
+		*stride = vc4_bo->handle->stride;
+	*handle = &vc4_bo->handle->base;
 
 	/* in pixels */
 	*stride /= bpp;

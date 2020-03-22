@@ -25,8 +25,7 @@ LOCAL_SHARED_LIBRARIES := \
         libcutils \
         liblog \
         libui \
-        libdrm \
-        libgralloc_drm
+        libdrm
 
 LOCAL_HEADER_LIBRARIES := android.hardware.graphics.mapper@2.0-passthrough_headers
 

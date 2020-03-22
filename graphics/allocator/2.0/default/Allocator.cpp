@@ -17,9 +17,7 @@ namespace implementation {
 
 Allocator::Allocator() {
     ALOGV("Constructing");
-    mModule = new drm_module_t;
-    mModule->drm = nullptr;
-    int error = drm_init(mModule);
+    int error = drm_init();
     if (error) {
         ALOGE("Failed drm_init() %d", error);
     }
@@ -27,11 +25,7 @@ Allocator::Allocator() {
 
 Allocator::~Allocator() {
 	ALOGV("Destructing");
-    if (mModule != nullptr) {
-        drm_deinit(mModule);
-        delete mModule;
-        mModule = nullptr;
-    }
+    drm_deinit();
 }
 
 Return<void> Allocator::dumpDebugInfo(dumpDebugInfo_cb hidl_cb) {
@@ -99,7 +93,7 @@ Error Allocator::allocateOneBuffer(
 
     ALOGV("Calling alloc(%u, %u, %i, %u)", descInfo.width,
             descInfo.height, descInfo.format, usage);
-    auto error = drm_alloc(mModule, static_cast<int>(descInfo.width),
+    auto error = drm_alloc(static_cast<int>(descInfo.width),
             static_cast<int>(descInfo.height), static_cast<int>(descInfo.format),
             usage, &handle, &stride);
     if (error != 0) {
