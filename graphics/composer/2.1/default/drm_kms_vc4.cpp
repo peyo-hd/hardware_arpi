@@ -62,13 +62,60 @@ static unsigned int drm_format_from_hal(int hal_format)
 	}
 }
 
+uint32_t red32 = 0xffff0000;
+uint32_t green32 = 0xff00ff00;
+uint32_t blue32 = 0xff0000ff;
+uint32_t white32 = 0xffffffff;
+uint32_t black32 = 0xff000000;
+
+void draw_grid(int w, int h, void* _loc) {
+    int i, j;
+    int stride = w;
+    uint32_t *loc32 = (uint32_t *)_loc;
+
+    for (j = 0; j < h/2; j++) {
+        for (i = 0; i < w/2; i++)
+            {}//loc32[i + j*(stride)] = red32;
+        for (; i < w; i++)
+            loc32[i + j*(stride)] = green32;
+    }
+
+    for (; j < h; j++) {
+        for (i = 0; i < w/2; i++)
+            loc32[i + j*(stride)] = blue32;
+        for (; i < w; i++)
+            {}//loc32[i + j*(stride)] = white32;
+    }
+
+}
+#include <sys/mman.h>
+#include <vc4_drm.h>
+
+void *mmap_bo_vc4(int fd, int handle, size_t size) {
+    struct drm_vc4_mmap_bo arg;
+    memset (&arg, 0, sizeof (arg));
+    arg.handle = handle;
+
+    int ret = drmCommandWriteRead(fd, DRM_VC4_MMAP_BO, &arg, sizeof(arg));
+    if (ret != 0) {
+        return nullptr;
+    }
+    void *map = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, arg.offset);
+
+    if (map == MAP_FAILED) {
+        return nullptr;
+    } else {
+        return map;
+    }
+}
+
 /*
  * Add a fb object for a bo.
  */
 int hwc_context::bo_add_fb(struct gralloc_drm_bo_t *bo)
 {
-	if (bo->fb_id)
-		return 0;
+	//if (bo->fb_id)
+	//	return 0;
 
 	uint32_t pitches[4] = { 0, 0, 0, 0 };
 	uint32_t offsets[4] = { 0, 0, 0, 0 };
@@ -80,6 +127,14 @@ int hwc_context::bo_add_fb(struct gralloc_drm_bo_t *bo)
 		ALOGE("bo_add_fb() error drmPrimeFDToHandle()");
 		return ret;
 	}
+
+    if (handle != 0) {
+        void *ptr = mmap_bo_vc4(kms_fd, handle, 1280 * 720 * 4);
+        if (ptr != nullptr) {
+            draw_grid(1280, 720, ptr);
+            munmap(ptr, 1280 * 720 * 4);
+        }
+    }
 
 	pitches[0] = bo->handle->stride;
 	handles[0] = handle;
@@ -229,7 +284,7 @@ int hwc_context::bo_post(struct gralloc_drm_bo_t *bo)
 {
 	int ret;
 
-	if (!bo->fb_id) {
+	//if (!bo->fb_id) {
 		int err = bo_add_fb(bo);
 		if (err) {
 			ALOGE("%s: could not create drm fb, (%s)",
@@ -237,7 +292,7 @@ int hwc_context::bo_post(struct gralloc_drm_bo_t *bo)
 			ALOGE("unable to post bo %p without fb", bo);
 			return err;
 		}
-	}
+	//}
 
 	/* TODO spawn a thread to avoid waiting and race */
 
