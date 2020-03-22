@@ -1,7 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
-LOCAL_MODULE := android.hardware.graphics.composer@2.1-impl.rpi3
+LOCAL_MODULE := android.hardware.graphics.composer@2.1-impl.rpi4
 LOCAL_VENDOR_MODULE := true
 LOCAL_PROPRIETARY_MODULE := true
 LOCAL_MODULE_RELATIVE_PATH := hw
