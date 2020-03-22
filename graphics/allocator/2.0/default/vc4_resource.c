@@ -548,7 +548,7 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
 
         if (screen->has_tiling_ioctl) {
                 uint64_t modifier;
-                if (rsc->tiled)
+                if ((rsc->tiled) && !(tmpl->bind & PIPE_BIND_SCANOUT))
                         modifier = DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED;
                 else
                         modifier = DRM_FORMAT_MOD_LINEAR;
